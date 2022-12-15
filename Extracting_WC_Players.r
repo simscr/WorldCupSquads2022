@@ -5,7 +5,7 @@ library(RCurl)
 library(ggmap)
 library(leaflet)
 
-wiki_URL <- "https://en.wikipedia.org/wiki/2018_FIFA_World_Cup_squads" #Storing the URL since it will be called upon multiple times.
+wiki_URL <- "https://en.wikipedia.org/wiki/2022_FIFA_World_Cup_squads" #Storing the URL since it will be called upon multiple times.
 
 #Setting up the xpaths to extract the WC squads
 xpaths <- vector(mode = "character", length = 32) #First setting an empty vector that the for loop below will store.
@@ -52,11 +52,16 @@ player_info <- function(x) { #Creating a function grabbing players' info that wo
     html_table(fill = TRUE) #Turn that info into a table
   player_info <- player_info[, 1:2] #Grab just the first couple of columns
   player_info <- player_info %>% 
+    janitor::clean_names() %>% 
     as_tibble() %>% #Turn that into a tibble
-    filter(.[[1]] %in% c("Place of birth", "Height", "Playing position")) #Select only the rows of info I want
-  names(player_info) <- c("attribute", "info") #Change the names of the variables
+    filter(.[[1]] %in% c("Place of birth", "Height", "Position(s)", "Full name")) %>% #Select only the rows of info I want
+    rename(attribute = 1, info = 2)
+  # names(player_info) <- c("attribute", "info") #Change the names of the variables
   return(player_info)
 }
+
+# x <- player_links[5]
+# player_info(player_links[5])
 
 Players_df <- Players_df %>% #Take the players data frame
   mutate(player_links = player_links, #Store their respective links
@@ -72,10 +77,10 @@ player_image <- function (x) { #Creating a function that will...
     html_attr("src") #Grab its URL location
 }
 
-Players_df <- mutate(Players_df, image = map(player_links, player_image)) #Apply the function created above for each player
+final_Players_df <- mutate(Players_df, image = map(player_links, player_image)) #Apply the function created above for each player
 
 #Cleaning up the data 
-Players_df <- Players_df %>% 
+ex_players_df <- final_Players_df %>% 
   mutate(Captain = if_else(str_detect(Player, "\\(c\\)"), "Captain", ""), #Add a captain variable if "(c)" is in the player's name.
          Player = Player %>% str_remove("\\(c\\)") %>% str_trim(), #Removing the "(c)" from the player's name and any whitespace.
          `Date of birth (age)` = `Date of birth (age)` %>% str_replace("^\\(\\d{4}-\\d{2}-\\d{2}\\)", "") %>% str_trim(), #Removing the "(yyyy-mm-dd)" part in this field
@@ -83,126 +88,280 @@ Players_df <- Players_df %>%
          Club = Club %>% str_remove("\\[[^]]*\\]") %>% str_trim(), #Remove footnotes
          Height = Height %>% str_remove("\\[[^]]*\\]") %>% str_trim(), #Remove footnotes
          `Place of birth` = `Place of birth` %>% str_remove("\\[[^]]*\\]") %>% str_trim(), #Remove footnotes
-         `Playing position` = `Playing position` %>% str_remove("\\[[^]]*\\]") %>% str_trim()) %>% #Remove footnotes
+         `Position(s)` = `Position(s)` %>% str_remove("\\[[^]]*\\]") %>% str_trim()) %>% #Remove footnotes
   separate(Club, c("Club", "club_delete"), sep = "\\[", extra = "merge", fill = "right") %>% #Remove footnotes for those that didn't work above for some reason
   separate(Height, c("Height", "height_delete"), sep = "\\[", extra = "merge", fill = "right") %>% #Remove footnotes for those that didn't work above for some reason 
   separate(`Place of birth`, c("Place of birth", "birth_delete"), sep = "\\[", extra = "merge", fill = "right") %>% #Remove footnotes for those that didn't work above for some reason
-  separate(`Playing position`, c("Playing position", "position_delete"), sep = "\\[", extra = "merge", fill = "right") %>% #Remove footnotes for those that didn't work above for some reason
+  separate(`Position(s)`, c("Playing position", "position_delete"), sep = "\\[", extra = "merge", fill = "right") %>% #Remove footnotes for those that didn't work above for some reason
   select(-delete, -xpaths, -Pos., -player_links, -club_delete, -height_delete, -birth_delete, -position_delete) #Remove unneeded columns
 
 #For each birthplace, get long and lat. Beforehand, I need to set up an alternate version of the place of birth 
 #variable to remove country names that don't exist anymore. Somehow the geolocation API works better if they only have
 #the city name.
-temp <- count(Players_df, `Place of birth`)
-View(temp)
 
-Players_df <- mutate(Players_df, 
-                     location_lookup = `Place of birth`,
-                     location_lookup = str_replace(location_lookup, "West Germany", "Germany"),
-                     location_lookup = str_replace(location_lookup, "East Germany", "Germany"),
-                     location_lookup = str_replace(location_lookup, "West Berlin", "Berlin, Germany"),
-                     location_lookup = str_replace(location_lookup, ", FR Yugoslavia", ""),
-                     location_lookup = str_replace(location_lookup, ", SFR Yugoslavia", ""),
-                     location_lookup = str_replace(location_lookup, ", Yugoslavia", ""),
-                     location_lookup = str_replace(location_lookup, ", SR Macedonia", ""),
-                     location_lookup = str_replace(location_lookup, ", SR Croatia", ""), 
-                     location_lookup = str_replace(location_lookup, "Leningrad, RSFSR,Soviet Union", "St Petersburg"),
-                     location_lookup = str_replace(location_lookup, ", Soviet Union", ""),
-                     location_lookup = str_replace(location_lookup, ", Russian SFSR", ""),
-                     location_lookup = str_replace(location_lookup, ", RSFSR", ""),
-                     location_lookup = str_replace(location_lookup, ", Uzbek SSR", ""),
-                     location_lookup = str_replace(location_lookup, ", Czechoslovakia", ""),
-                     location_lookup = str_replace(location_lookup, "Zaire", "Democratic Republic of the Congo"))
-                     
-rm(temp)
+library(tidygeocoder)
+locations_df <- distinct(ex_players_df_loc, location_lookup) %>% 
+  geocode(location_lookup, lat = latitude, long = longitude)
 
-locations_df <- distinct(Players_df, location_lookup)
 
-locations_df <- mutate_geocode(locations_df, location_lookup, source = "google", output = "latlon") #Get lon/lat for places of birth
+missing_loc <- locations_df %>% 
+  filter(is.na(latitude)) %>% 
+  select(-c(latitude, longitude)) %>% 
+  separate(location_lookup, sep = ", ", into = c("city", "state", "country"), remove = FALSE) %>% 
+  mutate(country = case_when(str_detect(state, "SR|Saudi|Ghana|Tunisia") ~ state,
+                             TRUE ~ country),
+         state = case_when(str_detect(state, "SR|Saudi|Ghana|Tunisia") ~ NA_character_,
+                             TRUE ~ state)) %>% 
+  geocode(city = city, lat = latitude, long = longitude)
 
-locations_df_missed <- locations_df %>% #Issues with the API limitations lead to some cities missed. 
-  filter(is.na(lon)) %>%  
-  select(-lon, -lat) %>% 
-  mutate_geocode(location_lookup, source = "google", output = "latlon")
-
-#The next few lines repeat the process and then re-merge the locations
-locations_df_missed2 <- locations_df_missed %>% 
-  filter(is.na(lon)) %>% 
-  select(-lon, -lat) %>% 
-  mutate_geocode(location_lookup, source = "google", output = "latlon")
-
-locations_df <- bind_rows(
-  filter(locations_df, !is.na(lon)),
-  filter(locations_df_missed, !is.na(lon)),
-  locations_df_missed2
+still_missing <- tribble(
+  ~city, ~latitude, ~longitude,
+  "Darreh-ye Badam", 33.600556, 48.014722,
+  "Ta'if", 21.275094, 40.406156,
+  "Aryanah", 36.8625, 10.195556
 )
+
+final_missing <- left_join(missing_loc, still_missing, by = "city") %>% 
+  mutate(latitude = coalesce(latitude.x, latitude.y),
+         longitude = coalesce(longitude.x, longitude.y)) %>% 
+  select(location_lookup, city, country, latitude, longitude)
+
+final_locations <- locations_df %>% 
+  left_join(final_missing, by = "location_lookup") %>% 
+  mutate(latitude = coalesce(latitude.x, latitude.y),
+         longitude = coalesce(longitude.x, longitude.y)) %>% 
+  select(location_lookup, latitude, longitude)
+
+# rio::export(here::here("locations.rds"), x = final_locations)
+
+library(countrycode)
 
 #Add a very slight random shock to the latitude and longitude coordinates so that the markers don't end up on top of each other.
-Players_df <- Players_df %>% 
-  left_join(locations_df) %>% 
-  mutate(lat_final = jitter(lat, amount = 0.02),
-         lon_final = jitter(lon, amount = 0.02))
+final_export <- ex_players_df_loc %>% 
+  left_join(final_locations) %>% 
+  mutate(lat = jitter(latitude, amount = 0.02),
+         lon = jitter(longitude, amount = 0.02),
+         links = paste0("https://en.wikipedia.org", player_links),
+         popup_text = paste0("<center>", #Setting up poopup info
+                            ifelse(!is.na(image), paste0("<img src = https:", image, " width='100'>"), ""),
+                            "</br><b>", Player, "</b>",
+                            "</br><b>Date of birth</b>: ", `Date of birth (age)`, 
+                            "</br><b>Place of birth</b>: ", `Place of birth`,
+                            "</br><b>Playing position</b>: ", `Playing position`,
+                            "</br><b>Club</b>: ", Club, 
+                            "</br><a href='", links, "' target='_blank'>More info...</a></center>")) %>% 
+  mutate(iso2 = countrycode(Countries, origin = "country.name", destination = "iso2c"),
+         flag = countrycode(Countries, "country.name", "unicode.symbol"),
+         flag = case_when(Countries == "England" ~ "\u1f981",
+                          Countries == "Wales" ~ "\u1f432",
+                          TRUE ~ flag))
 
-Players_df <- mutate(Players_df,
-                     links = paste0("https://en.wikipedia.org", player_links), #Bringing in player links
-                     popup_text = paste0("<center>", #Setting up poopup info
-                       ifelse(!is.na(image), paste0("<img src = https:", image, " width='100'>"), ""),
-                       "</br><b>", Player, "</b>",
-                       "</br><b>Date of birth</b>: ", Date.of.birth..age., 
-                       "</br><b>Place of birth</b>: ", Place.of.birth,
-                       "</br><b>Playing position</b>: ", Playing.position,
-                       "</br><b>Club</b>: ", Club, 
-                       "</br><a href='", links, "' target='_blank'>More info...</a></center>"))
+
+
+# Players_df <- Players_df %>% 
+#   left_join(locations_df) %>% 
+#   mutate(lat_final = jitter(lat, amount = 0.02),
+#          lon_final = jitter(lon, amount = 0.02))
+
+# Players_df <- mutate(Players_df,
+#                      links = paste0("https://en.wikipedia.org", player_links), #Bringing in player links
+#                      popup_text = paste0("<center>", #Setting up poopup info
+#                        ifelse(!is.na(image), paste0("<img src = https:", image, " width='100'>"), ""),
+#                        "</br><b>", Player, "</b>",
+#                        "</br><b>Date of birth</b>: ", Date.of.birth..age., 
+#                        "</br><b>Place of birth</b>: ", Place.of.birth,
+#                        "</br><b>Playing position</b>: ", Playing.position,
+#                        "</br><b>Club</b>: ", Club, 
+#                        "</br><a href='", links, "' target='_blank'>More info...</a></center>"))
 
 #Saving for the app
-write_rds(Players_df, "Players_df.rds") 
+write_rds(final_export, "Players_df.rds") 
 write_rds(Countries_df, "Countries_df.rds") 
 
+
+
+
+
 #Setting up icons - Flags taken from https://www.iconfinder.com
-flagIcon <- makeIcon(
-  iconUrl = case_when(
-    Players_df$Countries == "Russia" ~ "Country_flags/Russia.png",
-    Players_df$Countries == "Saudi Arabia" ~ "Country_flags/Saudi_Arabia.png",
-    Players_df$Countries == "Egypt" ~ "Country_flags/Egypt.png",
-    Players_df$Countries == "Uruguay" ~ "Country_flags/Uruguay.png",
-    Players_df$Countries == "Portugal" ~ "Country_flags/Portugal.png",
-    Players_df$Countries == "Spain" ~ "Country_flags/Spain.png",
-    Players_df$Countries == "Morocco" ~ "Country_flags/Morocco.png",
-    Players_df$Countries == "Iran" ~ "Country_flags/Iran.png",
-    Players_df$Countries == "France" ~ "Country_flags/France.png",
-    Players_df$Countries == "Australia" ~ "Country_flags/Australia.png",
-    Players_df$Countries == "Peru" ~ "Country_flags/Peru.png",
-    Players_df$Countries == "Denmark" ~ "Country_flags/Denmark.png",
-    Players_df$Countries == "Argentina" ~ "Country_flags/Argentina.png",
-    Players_df$Countries == "Iceland" ~ "Country_flags/Iceland.png",
-    Players_df$Countries == "Croatia" ~ "Country_flags/Croatia.png",
-    Players_df$Countries == "Nigeria" ~ "Country_flags/Nigeria.png",
-    Players_df$Countries == "Brazil" ~ "Country_flags/Brazil.png",
-    Players_df$Countries == "Switzerland" ~ "Country_flags/Switzerland.png",
-    Players_df$Countries == "Costa Rica" ~ "Country_flags/Costa_Rica.png",
-    Players_df$Countries == "Serbia" ~ "Country_flags/Serbia.png",
-    Players_df$Countries == "Germany" ~ "Country_flags/Germany.png",
-    Players_df$Countries == "Mexico" ~ "Country_flags/Mexico.png",
-    Players_df$Countries == "Sweden" ~ "Country_flags/Sweden.png",
-    Players_df$Countries == "South Korea" ~ "Country_flags/South_Korea.png",
-    Players_df$Countries == "Belgium" ~ "Country_flags/Belgium.png",
-    Players_df$Countries == "Panama" ~ "Country_flags/Panama.png",
-    Players_df$Countries == "Tunisia" ~ "Country_flags/Tunisia.png",
-    Players_df$Countries == "England" ~ "Country_flags/England.png",
-    Players_df$Countries == "Poland" ~ "Country_flags/Poland.png",
-    Players_df$Countries == "Senegal" ~ "Country_flags/Senegal.png",
-    Players_df$Countries == "Colombia" ~ "Country_flags/Colombia.png",
-    Players_df$Countries == "Japan" ~ "Country_flags/Japan.png"
+
+# Flags 
+#####
+
+iconWidth <- 25
+iconHeight <- 25
+shadowWidth <- 25
+shadowHeight <- 25
+
+flagIcon_cs <- leaflet::iconList(
+  "Argentina" = makeIcon(
+    iconUrl = "Country_flags/Argentina.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
   ),
-  iconWidth = 25, iconHeight = 25,
-  shadowWidth = 10, shadowHeight = 10
+  "Australia" = makeIcon(
+    iconUrl = "Country_flags/Australia.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Belgium" = makeIcon(
+    iconUrl = "Country_flags/Belgium.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Brazil" = makeIcon(
+    iconUrl = "Country_flags/Brazil.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Cameroon" = makeIcon(
+    iconUrl = "Country_flags/Cameroon.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Canada" = makeIcon(
+    iconUrl = "Country_flags/Canada.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Costa Rica" = makeIcon(
+    iconUrl = "Country_flags/Costa_Rica.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Croatia" = makeIcon(
+    iconUrl = "Country_flags/Croatia.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Denmark" = makeIcon(
+    iconUrl = "Country_flags/Denmark.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Ecuador" = makeIcon(
+    iconUrl = "Country_flags/Ecuador.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "England" = makeIcon(
+    iconUrl = "Country_flags/England.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "France" = makeIcon(
+    iconUrl = "Country_flags/France.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Germany" = makeIcon(
+    iconUrl = "Country_flags/Germany.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Ghana" = makeIcon(
+    iconUrl = "Country_flags/Ghana.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Iran" = makeIcon(
+    iconUrl = "Country_flags/Iran.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Japan" = makeIcon(
+    iconUrl = "Country_flags/Japan.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Mexico" = makeIcon(
+    iconUrl = "Country_flags/Mexico.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Morocco" = makeIcon(
+    iconUrl = "Country_flags/Morocco.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Netherlands" = makeIcon(
+    iconUrl = "Country_flags/Netherlands.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Poland" = makeIcon(
+    iconUrl = "Country_flags/Poland.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Portugal" = makeIcon(
+    iconUrl = "Country_flags/Portugal.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Qatar" = makeIcon(
+    iconUrl = "Country_flags/Qatar.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Saudi Arabia" = makeIcon(
+    iconUrl = "Country_flags/Saudi_Arabia.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Senegal" = makeIcon(
+    iconUrl = "Country_flags/Senegal.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Serbia" = makeIcon(
+    iconUrl = "Country_flags/Serbia.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "South Korea" = makeIcon(
+    iconUrl = "Country_flags/South_Korea.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Spain" = makeIcon(
+    iconUrl = "Country_flags/Spain.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Switzerland" = makeIcon(
+    iconUrl = "Country_flags/Switzerland.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Tunisia" = makeIcon(
+    iconUrl = "Country_flags/Tunisia.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "United States" = makeIcon(
+    iconUrl = "Country_flags/United_States.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Uruguay" = makeIcon(
+    iconUrl = "Country_flags/Uruguay.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  ),
+  "Wales" = makeIcon(
+    iconUrl = "Country_flags/Wales.png",
+    iconWidth = iconWidth, iconHeight = iconHeight,
+    shadowWidth = shadowWidth, shadowHeight = shadowHeight
+  )
 )
 
+#####
+
 #Map test
-leaflet(Players_df) %>%
-  addProviderTiles(providers$Esri.WorldTopoMap) %>%
-  addMarkers(~lon_final, ~lat_final, 
-             icon = flagIcon, 
-             label = ~Player, 
+leaflet(final_export) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addMarkers(~lon, ~lat, 
+             icon = ~ flagIcon_cs[Countries],
+             label = ~ Player, 
              labelOptions = labelOptions(textsize = "12px"),
              popup = ~popup_text)
